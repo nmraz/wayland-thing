@@ -7,6 +7,7 @@ struct wayland_thing_context {
     struct wl_display* display;
     struct wl_registry* registry;
     struct wl_compositor* compositor;
+    struct wl_shm* shm;
 };
 
 static void global_handler(void* data, struct wl_registry* registry,
@@ -20,6 +21,8 @@ static void global_handler(void* data, struct wl_registry* registry,
     if (!strcmp(interface, "wl_compositor")) {
         ctx->compositor =
             wl_registry_bind(registry, name, &wl_compositor_interface, 1);
+    } else if (!strcmp(interface, "wl_shm")) {
+        ctx->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     }
 }
 
