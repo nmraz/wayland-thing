@@ -148,6 +148,8 @@ int main(void) {
         return 1;
     }
 
+    xdg_toplevel_set_title(toplevel, "Wayland Thing");
+
     struct wl_buffer* buffer =
         wl_shm_pool_create_buffer(pool, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
                                   WINDOW_WIDTH, WL_SHM_FORMAT_ARGB8888);
