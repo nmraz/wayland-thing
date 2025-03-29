@@ -1,0 +1,11 @@
+[package]
+name = "wayland-thing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.97"
+memmap2 = "0.9.5"
+rustix = { version = "1.0.3", features = ["fs"] }
+wayland-client = "0.31.8"
+wayland-protocols = { version = "0.32.6", features = ["client"] }
