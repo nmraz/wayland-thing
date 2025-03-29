@@ -61,6 +61,14 @@ int main(void) {
         return 1;
     }
 
+    struct wl_surface* surface = wl_compositor_create_surface(ctx.compositor);
+    if (!surface) {
+        puts("failed to create surface");
+        return 1;
+    }
+
+    puts("created surface");
+
     wl_registry_destroy(registry);
     wl_display_disconnect(display);
 
