@@ -46,6 +46,15 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_global_remove_handler,
 };
 
+static void xdg_ping_handler(void* data, struct xdg_wm_base* xdg_wm_base,
+                             uint32_t serial) {
+    xdg_wm_base_pong(xdg_wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener xdg_listener = {
+    .ping = xdg_ping_handler,
+};
+
 #define WINDOW_WIDTH 500
 #define WINDOW_HEIGHT 500
 
@@ -100,6 +109,8 @@ int main(void) {
         puts("failed to get XDG shell object");
         return 1;
     }
+
+    xdg_wm_base_add_listener(ctx.xdg_wm_base, &xdg_listener, NULL);
 
     int pool_fd = memfd_create("wayland_thing_pool", MFD_CLOEXEC);
     if (pool_fd == -1) {
