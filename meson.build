@@ -1,6 +1,9 @@
 project('wayland-thing', 'c')
 
-wayland_client = dependency('wayland-client')
+cc = meson.get_compiler('c')
+
+libwayland_client = dependency('wayland-client')
+libm = cc.find_library('m')
 
 defines = ['-D_GNU_SOURCE']
 
@@ -12,6 +15,6 @@ sources = [
 executable(
     'wayland-thing',
     sources,
-    dependencies: [wayland_client],
+    dependencies: [libwayland_client, libm],
     c_args: defines,
 )

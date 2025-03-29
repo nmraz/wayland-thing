@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,15 +62,84 @@ static const struct xdg_wm_base_listener xdg_listener = {
 #define ALIGN_UP(a, b) (((a) + (b) - 1) & -(b))
 
 #define WINDOW_BUFFER_SIZE (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
-#define POOL_SIZE ALIGN_UP(WINDOW_BUFFER_SIZE, 0x1000)
+#define POOL_SIZE ALIGN_UP(2 * WINDOW_BUFFER_SIZE, 0x1000)
 
-static void draw_window(uint32_t* buffer, size_t width, size_t height,
-                        size_t stride) {
+#define THROB_PERIOD_MS 2000
+#define THROB_COLOR 0x0000ff
+
+static void draw_window(uint32_t* framebuffer, size_t width, size_t height,
+                        size_t stride, uint32_t frame_time_ms) {
+    double t =
+        (1. + sin(2. * M_PI * frame_time_ms / (double) THROB_PERIOD_MS)) * 0.5;
+
+    // Cheap (approximate) linear -> sRGB conversion.
+    double intensity = pow(t, 0.4545);
+    uint32_t color = (uint32_t) (intensity * THROB_COLOR);
+
     for (size_t i = 0; i < height; i++) {
         for (size_t j = 0; j < width; j++) {
-            buffer[stride * i + j] = 0xff0000ff;
+            framebuffer[stride * i + j] = color;
         }
     }
+}
+
+struct window_context {
+    uint32_t seq;
+    struct wl_surface* surface;
+    struct wl_shm_pool* pool;
+    uint8_t* pool_mapping;
+};
+
+static void present_frame(struct window_context* ctx, uint32_t frame_time);
+
+static void frame_callback_handler(void* data, struct wl_callback* callback,
+                                   uint32_t callback_data) {
+    present_frame(data, callback_data);
+};
+
+static const struct wl_callback_listener frame_callback_listener = {
+    .done = frame_callback_handler,
+};
+
+static void buffer_release_handler(void* data, struct wl_buffer* buffer) {
+    // This is easiest for now.
+    wl_buffer_destroy(buffer);
+}
+
+static const struct wl_buffer_listener buffer_listener = {
+    .release = buffer_release_handler,
+};
+
+static void present_frame(struct window_context* ctx, uint32_t frame_time_ms) {
+    // TODO: We assume buffers will always be released on time for
+    // double-buffering here to be sufficient.
+    uint32_t buffer_offset = ((ctx->seq++) & 1) * WINDOW_BUFFER_SIZE;
+
+    // It's easiest to repeatedly create new buffers for now.
+    struct wl_buffer* buffer = wl_shm_pool_create_buffer(
+        ctx->pool, buffer_offset, WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH,
+        WL_SHM_FORMAT_XRGB8888);
+    if (!buffer) {
+        puts("failed to create buffer");
+        exit(1);
+    }
+
+    wl_buffer_add_listener(buffer, &buffer_listener, NULL);
+
+    struct wl_callback* frame_callback = wl_surface_frame(ctx->surface);
+    if (!frame_callback) {
+        puts("failed to request new frame callback");
+        exit(1);
+    }
+
+    wl_callback_add_listener(frame_callback, &frame_callback_listener, ctx);
+
+    draw_window((uint32_t*) (ctx->pool_mapping + buffer_offset), WINDOW_WIDTH,
+                WINDOW_HEIGHT, WINDOW_HEIGHT, frame_time_ms);
+
+    wl_surface_attach(ctx->surface, buffer, 0, 0);
+    wl_surface_damage(ctx->surface, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+    wl_surface_commit(ctx->surface);
 }
 
 int main(void) {
@@ -150,34 +220,33 @@ int main(void) {
 
     xdg_toplevel_set_title(toplevel, "Wayland Thing");
 
-    struct wl_buffer* buffer =
-        wl_shm_pool_create_buffer(pool, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
-                                  WINDOW_WIDTH, WL_SHM_FORMAT_ARGB8888);
-    if (!buffer) {
-        puts("failed to create buffer");
+    uint8_t* pool_mapping =
+        mmap(NULL, POOL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, pool_fd, 0);
+    if (pool_mapping == MAP_FAILED) {
+        puts("failed to map pool");
         return 1;
     }
 
-    uint32_t* buffer_mapping =
-        mmap(NULL, WINDOW_BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
-             pool_fd, 0);
-    if (buffer_mapping == MAP_FAILED) {
-        puts("failed to map buffer");
-        return 1;
-    }
+    struct window_context window_ctx = {
+        .surface = surface,
+        .pool = pool,
+        .pool_mapping = pool_mapping,
+    };
 
-    draw_window(buffer_mapping, WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH);
-
-    wl_surface_attach(surface, buffer, 0, 0);
-    wl_surface_commit(surface);
-
+    // Draw the first frame manually so the window is actually visible. Once it
+    // is, we'll start getting frame callbacks from the compositor.
+    present_frame(&window_ctx, 200);
     for (;;) {
         wl_display_dispatch(display);
+        int err = wl_display_get_error(display);
+        if (err != 0) {
+            printf("wayland error: %s\n", strerror(err));
+            return 1;
+        }
     }
 
-    munmap(buffer_mapping, WINDOW_BUFFER_SIZE);
+    munmap(pool_mapping, POOL_SIZE);
 
-    wl_buffer_destroy(buffer);
     xdg_toplevel_destroy(toplevel);
     xdg_surface_destroy(xdg_surface);
     wl_surface_destroy(surface);
