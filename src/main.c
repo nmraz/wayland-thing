@@ -6,10 +6,13 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
+#include "protocols/xdg-shell.h"
+
 struct wayland_thing_context {
     struct wl_display* display;
     struct wl_registry* registry;
     struct wl_compositor* compositor;
+    struct xdg_wm_base* xdg_wm_base;
     struct wl_shm* shm;
 };
 
@@ -24,6 +27,9 @@ static void registry_global_handler(void* data, struct wl_registry* registry,
     if (!strcmp(interface, "wl_compositor")) {
         ctx->compositor =
             wl_registry_bind(registry, name, &wl_compositor_interface, 1);
+    } else if (!strcmp(interface, "xdg_wm_base")) {
+        ctx->xdg_wm_base =
+            wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
     } else if (!strcmp(interface, "wl_shm")) {
         ctx->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
     }
@@ -90,6 +96,11 @@ int main(void) {
         return 1;
     }
 
+    if (!ctx.xdg_wm_base) {
+        puts("failed to get XDG shell object");
+        return 1;
+    }
+
     int pool_fd = memfd_create("wayland_thing_pool", MFD_CLOEXEC);
     if (pool_fd == -1) {
         puts("failed to create pool fd");
@@ -113,7 +124,18 @@ int main(void) {
         return 1;
     }
 
-    puts("created surface");
+    struct xdg_surface* xdg_surface =
+        xdg_wm_base_get_xdg_surface(ctx.xdg_wm_base, surface);
+    if (!xdg_surface) {
+        puts("failed to get XDG surface");
+        return 1;
+    }
+
+    struct xdg_toplevel* toplevel = xdg_surface_get_toplevel(xdg_surface);
+    if (!toplevel) {
+        puts("failed to set surface as toplevel");
+        return 1;
+    }
 
     struct wl_buffer* buffer =
         wl_shm_pool_create_buffer(pool, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
@@ -143,11 +165,14 @@ int main(void) {
     munmap(buffer_mapping, WINDOW_BUFFER_SIZE);
 
     wl_buffer_destroy(buffer);
+    xdg_toplevel_destroy(toplevel);
+    xdg_surface_destroy(xdg_surface);
     wl_surface_destroy(surface);
     wl_shm_pool_destroy(pool);
 
     close(pool_fd);
 
+    xdg_wm_base_destroy(ctx.xdg_wm_base);
     wl_shm_destroy(ctx.shm);
     wl_compositor_destroy(ctx.compositor);
     wl_registry_destroy(ctx.registry);
