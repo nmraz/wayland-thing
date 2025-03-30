@@ -163,7 +163,7 @@ fn main() -> Result<()> {
 
     xdg_toplevel.set_title("Wayland Thing".to_owned());
 
-    let pool_fd = memfd_create("wayland_thing_pool", MemfdFlags::empty())?;
+    let pool_fd = memfd_create("wayland_thing_pool", MemfdFlags::CLOEXEC)?;
     ftruncate(&pool_fd, POOL_SIZE as u64)?;
 
     let shm_pool = shm.create_pool(pool_fd.as_fd(), POOL_SIZE.try_into()?, &queue.handle(), ());
