@@ -171,7 +171,7 @@ fn main() -> Result<()> {
         0,
         WINDOW_WIDTH as i32,
         WINDOW_HEIGHT as i32,
-        WINDOW_WIDTH as i32,
+        WINDOW_WIDTH as i32 * 4,
         Format::Xrgb8888,
         &queue.handle(),
         (),
