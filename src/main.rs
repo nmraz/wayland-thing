@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{f64, time::Duration};
 
 use anyhow::Result;
 use buffer_pool::{BufferPool, BufferToken};
@@ -101,8 +101,18 @@ impl Dispatch<WlCallback, ()> for State {
     }
 }
 
-fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, _timestamp: Duration) {
-    framebuffer.fill(0x000000ff);
+fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, timestamp: Duration) {
+    const THROB_PERIOD: Duration = Duration::from_secs(2);
+    const THROB_COLOR: u32 = 0x0000ff;
+
+    let periods = timestamp.as_secs_f64() / THROB_PERIOD.as_secs_f64();
+    let t = (1.0 + f64::sin(f64::consts::TAU * periods)) * 0.5;
+
+    // Cheap (approximate) linear -> sRGB conversion.
+    let intensity = t.powf(0.4545);
+
+    let color = (intensity * THROB_COLOR as f64) as u32;
+    framebuffer.fill(color);
 }
 
 const WINDOW_WIDTH: u32 = 500;
