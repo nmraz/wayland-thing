@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use buffer_pool::{BufferPool, BufferToken};
 use wayland_client::{
@@ -5,6 +7,7 @@ use wayland_client::{
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_buffer::WlBuffer,
+        wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
         wl_registry::{self, WlRegistry},
         wl_shm::WlShm,
@@ -21,6 +24,7 @@ use wayland_protocols::xdg::shell::client::{
 mod buffer_pool;
 
 struct State {
+    surface: WlSurface,
     buffer_pool: BufferPool,
     closed: bool,
 }
@@ -80,11 +84,42 @@ delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ignore WlShmPool);
 delegate_noop!(State: ignore XdgSurface);
 
+impl Dispatch<WlCallback, ()> for State {
+    fn event(
+        state: &mut Self,
+        _callback: &WlCallback,
+        event: wl_callback::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { callback_data } = event {
+            handle_frame(state, qh, Duration::from_millis(callback_data as u64))
+                .expect("frame callback failed");
+        }
+    }
+}
+
+fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, _timestamp: Duration) {
+    framebuffer.fill(0x000000ff);
+}
+
 const WINDOW_WIDTH: u32 = 500;
 const WINDOW_HEIGHT: u32 = 500;
 
-fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32) {
-    framebuffer.fill(0x000000ff);
+fn handle_frame(state: &mut State, qh: &QueueHandle<State>, timestamp: Duration) -> Result<()> {
+    let (buffer, mapping) = state.buffer_pool.get_buffer(qh)?;
+
+    eprintln!("frame at {timestamp:?}");
+    draw_window(mapping, WINDOW_WIDTH, WINDOW_HEIGHT, timestamp);
+    state.surface.frame(qh, ());
+    state.surface.attach(Some(&buffer), 0, 0);
+    state
+        .surface
+        .damage(0, 0, WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32);
+    state.surface.commit();
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -103,15 +138,12 @@ fn main() -> Result<()> {
     xdg_toplevel.set_title("Wayland Thing".to_owned());
 
     let mut state = State {
+        surface,
         buffer_pool: BufferPool::new(shm, &queue.handle(), WINDOW_WIDTH, WINDOW_HEIGHT)?,
         closed: false,
     };
 
-    let (buffer, mapping) = state.buffer_pool.get_buffer(&queue.handle())?;
-
-    draw_window(mapping, WINDOW_WIDTH, WINDOW_HEIGHT);
-    surface.attach(Some(&buffer), 0, 0);
-    surface.commit();
+    handle_frame(&mut state, &queue.handle(), Duration::default())?;
 
     while !state.closed {
         queue.blocking_dispatch(&mut state)?;
