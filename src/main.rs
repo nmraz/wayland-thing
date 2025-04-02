@@ -1,19 +1,19 @@
 use anyhow::Result;
 use buffer_pool::{BufferPool, BufferToken};
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, delegate_dispatch,
+    Connection, Dispatch, QueueHandle, delegate_dispatch, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_buffer::WlBuffer,
-        wl_compositor::{self, WlCompositor},
+        wl_compositor::WlCompositor,
         wl_registry::{self, WlRegistry},
-        wl_shm::{self, WlShm},
-        wl_shm_pool::{self, WlShmPool},
-        wl_surface::{self, WlSurface},
+        wl_shm::WlShm,
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
     },
 };
 use wayland_protocols::xdg::shell::client::{
-    xdg_surface::{self, XdgSurface},
+    xdg_surface::XdgSurface,
     xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
 };
@@ -31,54 +31,6 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         _registry: &WlRegistry,
         _event: wl_registry::Event,
         _data: &GlobalListContents,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlCompositor, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _compositor: &WlCompositor,
-        _event: wl_compositor::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlSurface, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _surface: &WlSurface,
-        _event: wl_surface::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlShm, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _shm: &WlShm,
-        _event: wl_shm::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlShmPool, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _pool: &WlShmPool,
-        _event: wl_shm_pool::Event,
-        _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
@@ -107,18 +59,6 @@ impl Dispatch<XdgWmBase, ()> for State {
     }
 }
 
-impl Dispatch<XdgSurface, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _xdg_surface: &XdgSurface,
-        _event: xdg_surface::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
 impl Dispatch<XdgToplevel, ()> for State {
     fn event(
         state: &mut Self,
@@ -133,6 +73,12 @@ impl Dispatch<XdgToplevel, ()> for State {
         }
     }
 }
+
+delegate_noop!(State: ignore WlCompositor);
+delegate_noop!(State: ignore WlSurface);
+delegate_noop!(State: ignore WlShm);
+delegate_noop!(State: ignore WlShmPool);
+delegate_noop!(State: ignore XdgSurface);
 
 const WINDOW_WIDTH: u32 = 500;
 const WINDOW_HEIGHT: u32 = 500;
