@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
+use log::trace;
 use memmap2::{MmapMut, RemapOptions};
 use rustix::fs::{MemfdFlags, ftruncate, memfd_create};
 use wayland_client::{
@@ -65,7 +66,7 @@ impl BufferPool {
         let old_size = self.mapping.len();
         let new_size = old_size + buffer_size(self.width, self.height);
 
-        eprintln!("resize pool: {old_size} -> {new_size}");
+        trace!("resize pool: {old_size} -> {new_size}");
 
         ftruncate(&self.fd, new_size as u64)?;
         unsafe {

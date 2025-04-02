@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use buffer_pool::{BufferPool, BufferToken};
+use log::trace;
 use wayland_client::{
     Connection, Dispatch, QueueHandle, delegate_dispatch, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
@@ -110,7 +111,7 @@ const WINDOW_HEIGHT: u32 = 500;
 fn handle_frame(state: &mut State, qh: &QueueHandle<State>, timestamp: Duration) -> Result<()> {
     let (buffer, mapping) = state.buffer_pool.get_buffer(qh)?;
 
-    eprintln!("frame at {timestamp:?}");
+    trace!("frame at {timestamp:?}");
     draw_window(mapping, WINDOW_WIDTH, WINDOW_HEIGHT, timestamp);
     state.surface.frame(qh, ());
     state.surface.attach(Some(&buffer), 0, 0);
@@ -123,8 +124,9 @@ fn handle_frame(state: &mut State, qh: &QueueHandle<State>, timestamp: Duration)
 }
 
 fn main() -> Result<()> {
-    let conn = Connection::connect_to_env()?;
+    env_logger::init();
 
+    let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
 
     let compositor: WlCompositor = globals.bind(&queue.handle(), 1..=1, ())?;
