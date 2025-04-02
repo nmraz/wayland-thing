@@ -1,16 +1,13 @@
-use std::{mem, os::fd::AsFd, slice};
-
 use anyhow::Result;
-use memmap2::MmapMut;
-use rustix::fs::{MemfdFlags, ftruncate, memfd_create};
+use buffer_pool::{BufferPool, BufferToken};
 use wayland_client::{
-    Connection, Dispatch, QueueHandle,
+    Connection, Dispatch, QueueHandle, delegate_dispatch,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer::{self, WlBuffer},
+        wl_buffer::WlBuffer,
         wl_compositor::{self, WlCompositor},
         wl_registry::{self, WlRegistry},
-        wl_shm::{self, Format, WlShm},
+        wl_shm::{self, WlShm},
         wl_shm_pool::{self, WlShmPool},
         wl_surface::{self, WlSurface},
     },
@@ -21,7 +18,10 @@ use wayland_protocols::xdg::shell::client::{
     xdg_wm_base::{self, XdgWmBase},
 };
 
+mod buffer_pool;
+
 struct State {
+    buffer_pool: BufferPool,
     closed: bool,
 }
 
@@ -85,15 +85,10 @@ impl Dispatch<WlShmPool, ()> for State {
     }
 }
 
-impl Dispatch<WlBuffer, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _buffer: &WlBuffer,
-        _event: wl_buffer::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
+delegate_dispatch!(State: [WlBuffer: BufferToken] => BufferPool);
+impl AsMut<BufferPool> for State {
+    fn as_mut(&mut self) -> &mut BufferPool {
+        &mut self.buffer_pool
     }
 }
 
@@ -141,8 +136,6 @@ impl Dispatch<XdgToplevel, ()> for State {
 
 const WINDOW_WIDTH: u32 = 500;
 const WINDOW_HEIGHT: u32 = 500;
-const WINDOW_BUFFER_SIZE: usize = (4 * WINDOW_WIDTH * WINDOW_HEIGHT) as usize;
-const POOL_SIZE: usize = WINDOW_BUFFER_SIZE;
 
 fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32) {
     framebuffer.fill(0x000000ff);
@@ -163,34 +156,17 @@ fn main() -> Result<()> {
 
     xdg_toplevel.set_title("Wayland Thing".to_owned());
 
-    let pool_fd = memfd_create("wayland_thing_pool", MemfdFlags::CLOEXEC)?;
-    ftruncate(&pool_fd, POOL_SIZE as u64)?;
-
-    let shm_pool = shm.create_pool(pool_fd.as_fd(), POOL_SIZE.try_into()?, &queue.handle(), ());
-    let buffer = shm_pool.create_buffer(
-        0,
-        WINDOW_WIDTH as i32,
-        WINDOW_HEIGHT as i32,
-        WINDOW_WIDTH as i32 * 4,
-        Format::Xrgb8888,
-        &queue.handle(),
-        (),
-    );
-
-    let mut pool_mapping = unsafe { MmapMut::map_mut(&pool_fd)? };
-    let framebuffer = unsafe {
-        slice::from_raw_parts_mut(
-            pool_mapping.as_mut_ptr().cast::<u32>(),
-            POOL_SIZE / mem::size_of::<u32>(),
-        )
+    let mut state = State {
+        buffer_pool: BufferPool::new(shm, &queue.handle(), WINDOW_WIDTH, WINDOW_HEIGHT)?,
+        closed: false,
     };
 
-    draw_window(framebuffer, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let (buffer, mapping) = state.buffer_pool.get_buffer(&queue.handle())?;
 
+    draw_window(mapping, WINDOW_WIDTH, WINDOW_HEIGHT);
     surface.attach(Some(&buffer), 0, 0);
     surface.commit();
 
-    let mut state = State { closed: false };
     while !state.closed {
         queue.blocking_dispatch(&mut state)?;
     }
