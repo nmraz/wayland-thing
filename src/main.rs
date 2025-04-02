@@ -2,7 +2,7 @@ use std::{f64, time::Duration};
 
 use anyhow::Result;
 use buffer_pool::{BufferDispatch, BufferHandle, BufferPool};
-use log::trace;
+use log::{debug, trace};
 use wayland_client::{
     Connection, Dispatch, QueueHandle, delegate_dispatch, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
@@ -13,7 +13,7 @@ use wayland_client::{
         wl_registry::{self, WlRegistry},
         wl_shm::WlShm,
         wl_shm_pool::WlShmPool,
-        wl_surface::WlSurface,
+        wl_surface::{self, WlSurface},
     },
 };
 use wayland_protocols::xdg::shell::client::{
@@ -24,11 +24,21 @@ use wayland_protocols::xdg::shell::client::{
 
 mod buffer_pool;
 
+const WINDOW_WIDTH: u32 = 500;
+const WINDOW_HEIGHT: u32 = 500;
+
 struct State {
+    shm: WlShm,
     surface: WlSurface,
+    buffer_scale: u32,
     buffer_pool: BufferPool,
     closed: bool,
 }
+
+delegate_noop!(State: ignore WlCompositor);
+delegate_noop!(State: ignore WlShm);
+delegate_noop!(State: ignore WlShmPool);
+delegate_noop!(State: ignore XdgSurface);
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
     fn event(
@@ -39,6 +49,32 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<WlSurface, ()> for State {
+    fn event(
+        state: &mut Self,
+        _surface: &WlSurface,
+        event: wl_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_surface::Event::PreferredBufferScale { factor } = event {
+            let factor = factor as u32;
+            if factor != state.buffer_scale {
+                debug!("buffer scale: {} -> {}", state.buffer_scale, factor);
+                state.buffer_scale = factor;
+                state.buffer_pool = BufferPool::new(
+                    &state.shm,
+                    qh,
+                    WINDOW_WIDTH * factor,
+                    WINDOW_HEIGHT * factor,
+                )
+                .expect("failed to create new buffer pool");
+            }
+        }
     }
 }
 
@@ -74,12 +110,6 @@ impl Dispatch<XdgToplevel, ()> for State {
     }
 }
 
-delegate_noop!(State: ignore WlCompositor);
-delegate_noop!(State: ignore WlSurface);
-delegate_noop!(State: ignore WlShm);
-delegate_noop!(State: ignore WlShmPool);
-delegate_noop!(State: ignore XdgSurface);
-
 impl Dispatch<WlCallback, ()> for State {
     fn event(
         state: &mut Self,
@@ -110,19 +140,29 @@ fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, timestamp: Du
     framebuffer.fill(color);
 }
 
-const WINDOW_WIDTH: u32 = 500;
-const WINDOW_HEIGHT: u32 = 500;
-
 fn handle_frame(state: &mut State, qh: &QueueHandle<State>, timestamp: Duration) -> Result<()> {
     let (buffer, mapping) = state.buffer_pool.get_buffer(qh)?;
 
     trace!("frame at {timestamp:?}");
-    draw_window(mapping, WINDOW_WIDTH, WINDOW_HEIGHT, timestamp);
-    state.surface.frame(qh, ());
+
+    let (width, height) = (
+        WINDOW_WIDTH * state.buffer_scale,
+        WINDOW_HEIGHT * state.buffer_scale,
+    );
+
+    draw_window(mapping, width, height, timestamp);
+
+    trace!(
+        "attach buffer {width}×{height}, scale {}",
+        state.buffer_scale
+    );
     state.surface.attach(Some(&buffer), 0, 0);
+    state.surface.set_buffer_scale(state.buffer_scale as i32);
     state
         .surface
-        .damage(0, 0, WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32);
+        .damage_buffer(0, 0, width as i32, height as i32);
+
+    state.surface.frame(qh, ());
     state.surface.commit();
 
     Ok(())
@@ -134,7 +174,7 @@ fn main() -> Result<()> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
 
-    let compositor: WlCompositor = globals.bind(&queue.handle(), 1..=1, ())?;
+    let compositor: WlCompositor = globals.bind(&queue.handle(), 4..=6, ())?;
     let shm: WlShm = globals.bind(&queue.handle(), 1..=1, ())?;
     let xdg_wm_base: XdgWmBase = globals.bind(&queue.handle(), 1..=1, ())?;
 
@@ -144,9 +184,12 @@ fn main() -> Result<()> {
 
     xdg_toplevel.set_title("Wayland Thing".to_owned());
 
+    let buffer_pool = BufferPool::new(&shm, &queue.handle(), WINDOW_WIDTH, WINDOW_HEIGHT)?;
     let mut state = State {
+        shm,
         surface,
-        buffer_pool: BufferPool::new(shm, &queue.handle(), WINDOW_WIDTH, WINDOW_HEIGHT)?,
+        buffer_scale: 1,
+        buffer_pool,
         closed: false,
     };
 

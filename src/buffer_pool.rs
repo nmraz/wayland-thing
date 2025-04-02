@@ -74,7 +74,7 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
-    pub fn new<S>(shm: WlShm, qh: &QueueHandle<S>, width: u32, height: u32) -> Result<Self>
+    pub fn new<S>(shm: &WlShm, qh: &QueueHandle<S>, width: u32, height: u32) -> Result<Self>
     where
         S: Dispatch<WlShmPool, ()> + 'static,
     {
