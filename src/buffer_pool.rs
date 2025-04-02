@@ -2,14 +2,18 @@ use std::{
     mem,
     os::fd::{AsFd, OwnedFd},
     slice,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::Result;
-use log::trace;
+use log::{debug, trace};
 use memmap2::{MmapMut, RemapOptions};
 use rustix::fs::{MemfdFlags, ftruncate, memfd_create};
 use wayland_client::{
-    Connection, Dispatch, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle,
     protocol::{
         wl_buffer::{self, WlBuffer},
         wl_shm::{Format, WlShm},
@@ -17,8 +21,47 @@ use wayland_client::{
     },
 };
 
-pub struct BufferToken {
+pub struct BufferHandle {
     offset: usize,
+    pool: Weak<Mutex<AvailableBufferPool>>,
+    loaned: AtomicBool,
+}
+
+impl BufferHandle {
+    fn release(&self, buffer: &WlBuffer) {
+        trace!("release buffer {} (offset {:#x})", buffer.id(), self.offset);
+
+        let loaned = self.loaned.swap(false, Ordering::Relaxed);
+        assert!(loaned, "attempted to release buffer twice");
+
+        if let Some(pool) = self.pool.upgrade() {
+            pool.lock()
+                .unwrap()
+                .available_buffers
+                .push((buffer.clone(), self.offset));
+        } else {
+            buffer.destroy();
+        }
+    }
+}
+
+pub struct BufferDispatch;
+impl<S> Dispatch<WlBuffer, BufferHandle, S> for BufferDispatch
+where
+    S: Dispatch<WlBuffer, BufferHandle>,
+{
+    fn event(
+        _state: &mut S,
+        buffer: &WlBuffer,
+        event: wl_buffer::Event,
+        handle: &BufferHandle,
+        _conn: &Connection,
+        _qh: &QueueHandle<S>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            handle.release(buffer);
+        }
+    }
 }
 
 pub struct BufferPool {
@@ -27,7 +70,7 @@ pub struct BufferPool {
     shm_pool: WlShmPool,
     fd: OwnedFd,
     mapping: MmapMut,
-    available_buffers: Vec<(WlBuffer, usize)>,
+    available_buffers: Arc<Mutex<AvailableBufferPool>>,
 }
 
 impl BufferPool {
@@ -50,23 +93,31 @@ impl BufferPool {
             shm_pool,
             fd,
             mapping,
-            available_buffers: vec![],
+            available_buffers: Arc::new(Mutex::new(AvailableBufferPool {
+                available_buffers: vec![],
+            })),
         })
     }
 
     pub fn get_buffer<S>(&mut self, qh: &QueueHandle<S>) -> Result<(WlBuffer, &mut [u32])>
     where
-        S: Dispatch<WlBuffer, BufferToken> + 'static,
+        S: Dispatch<WlBuffer, BufferHandle> + 'static,
     {
-        if let Some((buffer, offset)) = self.available_buffers.pop() {
-            let mapping = self.buffer_at_offset(offset);
-            return Ok((buffer, mapping));
+        {
+            let mut available_buffers = self.available_buffers.lock().unwrap();
+            if let Some((buffer, offset)) = available_buffers.available_buffers.pop() {
+                drop(available_buffers);
+                let handle = buffer.data::<BufferHandle>().unwrap();
+                handle.loaned.store(true, Ordering::Relaxed);
+                let mapping = self.buffer_at_offset(offset);
+                return Ok((buffer, mapping));
+            }
         }
 
         let old_size = self.mapping.len();
         let new_size = old_size + buffer_size(self.width, self.height);
 
-        trace!("resize pool: {old_size} -> {new_size}");
+        debug!("resize pool: {old_size} -> {new_size}");
 
         ftruncate(&self.fd, new_size as u64)?;
         unsafe {
@@ -75,7 +126,11 @@ impl BufferPool {
         }
         self.shm_pool.resize(new_size as i32);
 
-        let new_token = BufferToken { offset: old_size };
+        let new_handle = BufferHandle {
+            offset: old_size,
+            pool: Arc::downgrade(&self.available_buffers),
+            loaned: AtomicBool::new(true),
+        };
 
         let buffer = self.shm_pool.create_buffer(
             old_size as i32,
@@ -84,7 +139,7 @@ impl BufferPool {
             (self.width as usize * mem::size_of::<u32>()) as i32,
             Format::Xrgb8888,
             qh,
-            new_token,
+            new_handle,
         );
 
         Ok((buffer, self.buffer_at_offset(old_size)))
@@ -100,29 +155,18 @@ impl BufferPool {
     }
 }
 
-impl<S> Dispatch<WlBuffer, BufferToken, S> for BufferPool
-where
-    S: AsMut<BufferPool> + Dispatch<WlBuffer, BufferToken>,
-{
-    fn event(
-        state: &mut S,
-        buffer: &WlBuffer,
-        event: wl_buffer::Event,
-        token: &BufferToken,
-        _conn: &Connection,
-        _qh: &QueueHandle<S>,
-    ) {
-        let pool = state.as_mut();
-        if let wl_buffer::Event::Release = event {
-            pool.available_buffers.push((buffer.clone(), token.offset));
-        }
-    }
-}
-
 impl Drop for BufferPool {
     fn drop(&mut self) {
         self.shm_pool.destroy();
+    }
+}
 
+struct AvailableBufferPool {
+    available_buffers: Vec<(WlBuffer, usize)>,
+}
+
+impl Drop for AvailableBufferPool {
+    fn drop(&mut self) {
         for (buffer, _) in &self.available_buffers {
             buffer.destroy();
         }

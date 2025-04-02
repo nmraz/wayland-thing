@@ -1,7 +1,7 @@
 use std::{f64, time::Duration};
 
 use anyhow::Result;
-use buffer_pool::{BufferPool, BufferToken};
+use buffer_pool::{BufferDispatch, BufferHandle, BufferPool};
 use log::trace;
 use wayland_client::{
     Connection, Dispatch, QueueHandle, delegate_dispatch, delegate_noop,
@@ -42,12 +42,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
     }
 }
 
-delegate_dispatch!(State: [WlBuffer: BufferToken] => BufferPool);
-impl AsMut<BufferPool> for State {
-    fn as_mut(&mut self) -> &mut BufferPool {
-        &mut self.buffer_pool
-    }
-}
+delegate_dispatch!(State: [WlBuffer: BufferHandle] => BufferDispatch);
 
 impl Dispatch<XdgWmBase, ()> for State {
     fn event(
