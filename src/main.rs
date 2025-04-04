@@ -17,7 +17,13 @@ use wayland_client::{
     },
 };
 use wayland_protocols::{
-    wp::viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+    wp::{
+        fractional_scale::v1::client::{
+            wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+            wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+        },
+        viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+    },
     xdg::shell::client::{
         xdg_surface::XdgSurface,
         xdg_toplevel::{self, XdgToplevel},
@@ -34,7 +40,8 @@ struct State {
     shm: WlShm,
     surface: WlSurface,
     viewport: WpViewport,
-    buffer_scale: u32,
+    fractional_scale_supported: bool,
+    scale: f64,
     buffer_pool: BufferPool,
     closed: bool,
 }
@@ -44,6 +51,7 @@ delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ignore WlShmPool);
 delegate_noop!(State: ignore WpViewporter);
 delegate_noop!(State: ignore WpViewport);
+delegate_noop!(State: ignore WpFractionalScaleManagerV1);
 delegate_noop!(State: ignore XdgSurface);
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
@@ -67,24 +75,30 @@ impl Dispatch<WlSurface, ()> for State {
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_surface::Event::PreferredBufferScale { factor } = event {
-            let factor = factor as u32;
-            if factor != state.buffer_scale {
-                debug!("buffer scale: {} -> {}", state.buffer_scale, factor);
-                state.buffer_scale = factor;
-                state.buffer_pool = BufferPool::new(
-                    &state.shm,
-                    qh,
-                    WINDOW_WIDTH * factor,
-                    WINDOW_HEIGHT * factor,
-                )
-                .expect("failed to create new buffer pool");
+        if !state.fractional_scale_supported {
+            if let wl_surface::Event::PreferredBufferScale { factor } = event {
+                state.set_scale(qh, factor as f64);
             }
         }
     }
 }
 
 delegate_dispatch!(State: [WlBuffer: BufferHandle] => BufferDispatch);
+
+impl Dispatch<WpFractionalScaleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            state.set_scale(qh, (scale as f64) / 120.0);
+        }
+    }
+}
 
 impl Dispatch<XdgWmBase, ()> for State {
     fn event(
@@ -126,13 +140,14 @@ impl Dispatch<WlCallback, ()> for State {
         qh: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { callback_data } = event {
-            handle_frame(state, qh, Duration::from_millis(callback_data as u64))
+            state
+                .handle_frame(qh, Duration::from_millis(callback_data as u64))
                 .expect("frame callback failed");
         }
     }
 }
 
-fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, timestamp: Duration) {
+fn draw_window(framebuffer: &mut [u32], _width: f64, _height: f64, timestamp: Duration) {
     const THROB_PERIOD: Duration = Duration::from_secs(2);
     const THROB_COLOR: u32 = 0x0000ff;
 
@@ -146,37 +161,46 @@ fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, timestamp: Du
     framebuffer.fill(color);
 }
 
-fn handle_frame(state: &mut State, qh: &QueueHandle<State>, timestamp: Duration) -> Result<()> {
-    let (buffer, mapping) = state.buffer_pool.get_buffer(qh)?;
+impl State {
+    fn handle_frame(&mut self, qh: &QueueHandle<Self>, timestamp: Duration) -> Result<()> {
+        let (buffer, mapping) = self.buffer_pool.get_buffer(qh)?;
 
-    trace!("frame at {timestamp:?}");
+        trace!("frame at {timestamp:?}");
 
-    let (width, height) = (
-        WINDOW_WIDTH * state.buffer_scale,
-        WINDOW_HEIGHT * state.buffer_scale,
-    );
+        let (width, height) = (
+            WINDOW_WIDTH as f64 * self.scale,
+            WINDOW_HEIGHT as f64 * self.scale,
+        );
 
-    draw_window(mapping, width, height, timestamp);
+        draw_window(mapping, width, height, timestamp);
 
-    trace!(
-        "attach buffer {width}×{height}, scale {}",
-        state.buffer_scale
-    );
-    state.surface.attach(Some(&buffer), 0, 0);
-    state
-        .viewport
-        .set_source(0.0, 0.0, width as f64, height as f64);
-    state
-        .viewport
-        .set_destination(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32);
-    state
-        .surface
-        .damage_buffer(0, 0, width as i32, height as i32);
+        trace!("attach buffer {width}×{height}, scale {}", self.scale);
 
-    state.surface.frame(qh, ());
-    state.surface.commit();
+        self.surface.attach(Some(&buffer), 0, 0);
+        self.viewport.set_source(0.0, 0.0, width, height);
+        self.viewport
+            .set_destination(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32);
+        self.surface
+            .damage_buffer(0, 0, width as i32, height as i32);
 
-    Ok(())
+        self.surface.frame(qh, ());
+        self.surface.commit();
+
+        Ok(())
+    }
+
+    fn set_scale(&mut self, qh: &QueueHandle<Self>, scale: f64) {
+        if scale != self.scale {
+            debug!("buffer scale: {} -> {}", self.scale, scale);
+
+            let new_width = (WINDOW_WIDTH as f64 * scale).round() as u32;
+            let new_height = (WINDOW_HEIGHT as f64 * scale).round() as u32;
+
+            self.scale = scale;
+            self.buffer_pool = BufferPool::new(&self.shm, qh, new_width, new_height)
+                .expect("failed to create new buffer pool");
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -189,9 +213,16 @@ fn main() -> Result<()> {
     let shm: WlShm = globals.bind(&queue.handle(), 1..=1, ())?;
     let xdg_wm_base: XdgWmBase = globals.bind(&queue.handle(), 1..=1, ())?;
     let viewporter: WpViewporter = globals.bind(&queue.handle(), 1..=1, ())?;
+    let fractional_scale_manager: Option<WpFractionalScaleManagerV1> =
+        globals.bind(&queue.handle(), 1..=1, ()).ok();
 
     let surface = compositor.create_surface(&queue.handle(), ());
     let viewport = viewporter.get_viewport(&surface, &queue.handle(), ());
+
+    if let Some(fractional_scale_manager) = &fractional_scale_manager {
+        fractional_scale_manager.get_fractional_scale(&surface, &queue.handle(), ());
+    }
+
     let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &queue.handle(), ());
     let xdg_toplevel = xdg_surface.get_toplevel(&queue.handle(), ());
 
@@ -202,12 +233,13 @@ fn main() -> Result<()> {
         shm,
         surface,
         viewport,
-        buffer_scale: 1,
+        fractional_scale_supported: fractional_scale_manager.is_some(),
+        scale: 1.0,
         buffer_pool,
         closed: false,
     };
 
-    handle_frame(&mut state, &queue.handle(), Duration::default())?;
+    state.handle_frame(&queue.handle(), Duration::default())?;
 
     while !state.closed {
         queue.blocking_dispatch(&mut state)?;
