@@ -16,10 +16,13 @@ use wayland_client::{
         wl_surface::{self, WlSurface},
     },
 };
-use wayland_protocols::xdg::shell::client::{
-    xdg_surface::XdgSurface,
-    xdg_toplevel::{self, XdgToplevel},
-    xdg_wm_base::{self, XdgWmBase},
+use wayland_protocols::{
+    wp::viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+    xdg::shell::client::{
+        xdg_surface::XdgSurface,
+        xdg_toplevel::{self, XdgToplevel},
+        xdg_wm_base::{self, XdgWmBase},
+    },
 };
 
 mod buffer_pool;
@@ -30,6 +33,7 @@ const WINDOW_HEIGHT: u32 = 500;
 struct State {
     shm: WlShm,
     surface: WlSurface,
+    viewport: WpViewport,
     buffer_scale: u32,
     buffer_pool: BufferPool,
     closed: bool,
@@ -38,6 +42,8 @@ struct State {
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ignore WlShmPool);
+delegate_noop!(State: ignore WpViewporter);
+delegate_noop!(State: ignore WpViewport);
 delegate_noop!(State: ignore XdgSurface);
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
@@ -157,7 +163,12 @@ fn handle_frame(state: &mut State, qh: &QueueHandle<State>, timestamp: Duration)
         state.buffer_scale
     );
     state.surface.attach(Some(&buffer), 0, 0);
-    state.surface.set_buffer_scale(state.buffer_scale as i32);
+    state
+        .viewport
+        .set_source(0.0, 0.0, width as f64, height as f64);
+    state
+        .viewport
+        .set_destination(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32);
     state
         .surface
         .damage_buffer(0, 0, width as i32, height as i32);
@@ -177,8 +188,10 @@ fn main() -> Result<()> {
     let compositor: WlCompositor = globals.bind(&queue.handle(), 4..=6, ())?;
     let shm: WlShm = globals.bind(&queue.handle(), 1..=1, ())?;
     let xdg_wm_base: XdgWmBase = globals.bind(&queue.handle(), 1..=1, ())?;
+    let viewporter: WpViewporter = globals.bind(&queue.handle(), 1..=1, ())?;
 
     let surface = compositor.create_surface(&queue.handle(), ());
+    let viewport = viewporter.get_viewport(&surface, &queue.handle(), ());
     let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &queue.handle(), ());
     let xdg_toplevel = xdg_surface.get_toplevel(&queue.handle(), ());
 
@@ -188,6 +201,7 @@ fn main() -> Result<()> {
     let mut state = State {
         shm,
         surface,
+        viewport,
         buffer_scale: 1,
         buffer_pool,
         closed: false,
