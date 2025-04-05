@@ -33,10 +33,9 @@ use wayland_protocols::{
 
 mod buffer_pool;
 
-const WINDOW_WIDTH: u32 = 500;
-const WINDOW_HEIGHT: u32 = 500;
-
-struct State {
+struct Window {
+    width: u32,
+    height: u32,
     shm: WlShm,
     surface: WlSurface,
     viewport: WpViewport,
@@ -46,17 +45,17 @@ struct State {
     closed: bool,
 }
 
-delegate_noop!(State: ignore WlCompositor);
-delegate_noop!(State: ignore WlShm);
-delegate_noop!(State: ignore WlShmPool);
-delegate_noop!(State: ignore WpViewporter);
-delegate_noop!(State: ignore WpViewport);
-delegate_noop!(State: ignore WpFractionalScaleManagerV1);
-delegate_noop!(State: ignore XdgSurface);
+delegate_noop!(Window: ignore WlCompositor);
+delegate_noop!(Window: ignore WlShm);
+delegate_noop!(Window: ignore WlShmPool);
+delegate_noop!(Window: ignore WpViewporter);
+delegate_noop!(Window: ignore WpViewport);
+delegate_noop!(Window: ignore WpFractionalScaleManagerV1);
+delegate_noop!(Window: ignore XdgSurface);
 
-impl Dispatch<WlRegistry, GlobalListContents> for State {
+impl Dispatch<WlRegistry, GlobalListContents> for Window {
     fn event(
-        _state: &mut Self,
+        _window: &mut Self,
         _registry: &WlRegistry,
         _event: wl_registry::Event,
         _data: &GlobalListContents,
@@ -66,28 +65,28 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
     }
 }
 
-impl Dispatch<WlSurface, ()> for State {
+impl Dispatch<WlSurface, ()> for Window {
     fn event(
-        state: &mut Self,
+        window: &mut Self,
         _surface: &WlSurface,
         event: wl_surface::Event,
         _data: &(),
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if !state.fractional_scale_supported {
+        if !window.fractional_scale_supported {
             if let wl_surface::Event::PreferredBufferScale { factor } = event {
-                state.set_scale(qh, factor as f64);
+                window.set_scale(qh, factor as f64);
             }
         }
     }
 }
 
-delegate_dispatch!(State: [WlBuffer: BufferHandle] => BufferDispatch);
+delegate_dispatch!(Window: [WlBuffer: BufferHandle] => BufferDispatch);
 
-impl Dispatch<WpFractionalScaleV1, ()> for State {
+impl Dispatch<WpFractionalScaleV1, ()> for Window {
     fn event(
-        state: &mut Self,
+        window: &mut Self,
         _proxy: &WpFractionalScaleV1,
         event: wp_fractional_scale_v1::Event,
         _data: &(),
@@ -95,14 +94,14 @@ impl Dispatch<WpFractionalScaleV1, ()> for State {
         qh: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.set_scale(qh, (scale as f64) / 120.0);
+            window.set_scale(qh, (scale as f64) / 120.0);
         }
     }
 }
 
-impl Dispatch<XdgWmBase, ()> for State {
+impl Dispatch<XdgWmBase, ()> for Window {
     fn event(
-        _state: &mut Self,
+        _window: &mut Self,
         xdg_wm_base: &XdgWmBase,
         event: xdg_wm_base::Event,
         _data: &(),
@@ -115,9 +114,9 @@ impl Dispatch<XdgWmBase, ()> for State {
     }
 }
 
-impl Dispatch<XdgToplevel, ()> for State {
+impl Dispatch<XdgToplevel, ()> for Window {
     fn event(
-        state: &mut Self,
+        window: &mut Self,
         _xdg_toplevel: &XdgToplevel,
         event: xdg_toplevel::Event,
         _data: &(),
@@ -125,14 +124,14 @@ impl Dispatch<XdgToplevel, ()> for State {
         _qh: &QueueHandle<Self>,
     ) {
         if let xdg_toplevel::Event::Close = event {
-            state.closed = true;
+            window.closed = true;
         }
     }
 }
 
-impl Dispatch<WlCallback, ()> for State {
+impl Dispatch<WlCallback, ()> for Window {
     fn event(
-        state: &mut Self,
+        window: &mut Self,
         _callback: &WlCallback,
         event: wl_callback::Event,
         _data: &(),
@@ -140,7 +139,7 @@ impl Dispatch<WlCallback, ()> for State {
         qh: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { callback_data } = event {
-            state
+            window
                 .handle_frame(qh, Duration::from_millis(callback_data as u64))
                 .expect("frame callback failed");
         }
@@ -161,15 +160,15 @@ fn draw_window(framebuffer: &mut [u32], _width: f64, _height: f64, timestamp: Du
     framebuffer.fill(color);
 }
 
-impl State {
+impl Window {
     fn handle_frame(&mut self, qh: &QueueHandle<Self>, timestamp: Duration) -> Result<()> {
         let (buffer, mapping) = self.buffer_pool.get_buffer(qh)?;
 
         trace!("frame at {timestamp:?}");
 
         let (width, height) = (
-            WINDOW_WIDTH as f64 * self.scale,
-            WINDOW_HEIGHT as f64 * self.scale,
+            self.width as f64 * self.scale,
+            self.height as f64 * self.scale,
         );
 
         draw_window(mapping, width, height, timestamp);
@@ -179,7 +178,7 @@ impl State {
         self.surface.attach(Some(&buffer), 0, 0);
         self.viewport.set_source(0.0, 0.0, width, height);
         self.viewport
-            .set_destination(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32);
+            .set_destination(self.width as i32, self.height as i32);
         self.surface
             .damage_buffer(0, 0, width as i32, height as i32);
 
@@ -193,8 +192,8 @@ impl State {
         if scale != self.scale {
             debug!("buffer scale: {} -> {}", self.scale, scale);
 
-            let new_width = (WINDOW_WIDTH as f64 * scale).round() as u32;
-            let new_height = (WINDOW_HEIGHT as f64 * scale).round() as u32;
+            let new_width = (self.width as f64 * scale).round() as u32;
+            let new_height = (self.height as f64 * scale).round() as u32;
 
             self.scale = scale;
             self.buffer_pool = BufferPool::new(&self.shm, qh, new_width, new_height)
@@ -207,7 +206,7 @@ fn main() -> Result<()> {
     env_logger::init();
 
     let conn = Connection::connect_to_env()?;
-    let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
+    let (globals, mut queue) = registry_queue_init::<Window>(&conn)?;
 
     let compositor: WlCompositor = globals.bind(&queue.handle(), 4..=6, ())?;
     let shm: WlShm = globals.bind(&queue.handle(), 1..=1, ())?;
@@ -228,8 +227,13 @@ fn main() -> Result<()> {
 
     xdg_toplevel.set_title("Wayland Thing".to_owned());
 
+    const WINDOW_WIDTH: u32 = 500;
+    const WINDOW_HEIGHT: u32 = 500;
+
     let buffer_pool = BufferPool::new(&shm, &queue.handle(), WINDOW_WIDTH, WINDOW_HEIGHT)?;
-    let mut state = State {
+    let mut window = Window {
+        width: WINDOW_WIDTH,
+        height: WINDOW_HEIGHT,
         shm,
         surface,
         viewport,
@@ -239,10 +243,10 @@ fn main() -> Result<()> {
         closed: false,
     };
 
-    state.handle_frame(&queue.handle(), Duration::default())?;
+    window.handle_frame(&queue.handle(), Duration::default())?;
 
-    while !state.closed {
-        queue.blocking_dispatch(&mut state)?;
+    while !window.closed {
+        queue.blocking_dispatch(&mut window)?;
     }
 
     Ok(())
