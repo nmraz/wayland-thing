@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.97"
+ash = "0.38.0"
 env_logger = { version = "0.11.8", default-features = false }
 log = { version = "0.4.27", default-features = false }
 memmap2 = "0.9.5"

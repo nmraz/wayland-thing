@@ -5,6 +5,7 @@ use wayland_client::{Connection, globals::registry_queue_init};
 use window::Window;
 
 mod buffer_pool;
+mod vulkan;
 mod window;
 
 fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, timestamp: Duration) {
@@ -21,11 +22,19 @@ fn draw_window(framebuffer: &mut [u32], _width: u32, _height: u32, timestamp: Du
     framebuffer.fill(color);
 }
 
+fn init_vulkan() -> Result<()> {
+    let instance = vulkan::Instance::new()?;
+    let _device = instance.create_default_graphics_device()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::init();
 
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init(&conn)?;
+
+    init_vulkan()?;
 
     let mut window = Window::new(
         &globals,
