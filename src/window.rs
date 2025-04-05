@@ -117,7 +117,7 @@ impl Window {
         self.surface
             .damage_buffer(0, 0, width as i32, height as i32);
 
-        self.surface.frame(qh, ());
+        self.surface.frame(qh, FrameCallbackToken);
         self.surface.commit();
 
         Ok(())
@@ -136,6 +136,8 @@ impl Window {
         }
     }
 }
+
+struct FrameCallbackToken;
 
 delegate_noop!(Window: ignore WlCompositor);
 delegate_noop!(Window: ignore WlShm);
@@ -221,12 +223,12 @@ impl Dispatch<XdgToplevel, ()> for Window {
     }
 }
 
-impl Dispatch<WlCallback, ()> for Window {
+impl Dispatch<WlCallback, FrameCallbackToken> for Window {
     fn event(
         window: &mut Self,
         _callback: &WlCallback,
         event: wl_callback::Event,
-        _data: &(),
+        _token: &FrameCallbackToken,
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
