@@ -5,7 +5,7 @@ use ash::vk;
 use log::info;
 
 pub struct Instance {
-    _entry: ash::Entry,
+    entry: ash::Entry,
     instance: ash::Instance,
 }
 
@@ -31,10 +31,7 @@ impl Instance {
 
         let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
 
-        Ok(Arc::new(Self {
-            _entry: entry,
-            instance,
-        }))
+        Ok(Arc::new(Self { entry, instance }))
     }
 
     pub fn create_default_graphics_device(self: &Arc<Self>) -> Result<Arc<Device>> {
@@ -78,26 +75,58 @@ impl Instance {
             },
             ..Default::default()
         };
-        let device = unsafe {
-            self.instance
-                .create_device(physical_device, &device_create_info, None)?
-        };
 
-        Ok(Arc::new(Device {
-            _instance: Arc::clone(self),
-            device,
-            _queue_family_index: queue_family_index,
-        }))
+        // NOTE: Don't exit this block early, because `device` will be leaked if so.
+        {
+            let device = unsafe {
+                self.instance
+                    .create_device(physical_device, &device_create_info, None)?
+            };
+
+            let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+            Ok(Arc::new(Device {
+                instance: Arc::clone(self),
+                device,
+                queue_family_index,
+                queue,
+            }))
+        }
+    }
+
+    pub fn entry(&self) -> &ash::Entry {
+        &self.entry
+    }
+
+    pub fn instance(&self) -> &ash::Instance {
+        &self.instance
     }
 }
 
 pub struct Device {
-    _instance: Arc<Instance>,
     device: ash::Device,
-    _queue_family_index: u32,
+    instance: Arc<Instance>,
+    queue_family_index: u32,
+    queue: vk::Queue,
 }
 
-impl Device {}
+impl Device {
+    pub fn instance(&self) -> &Arc<Instance> {
+        &self.instance
+    }
+
+    pub fn device(&self) -> &ash::Device {
+        &self.device
+    }
+
+    pub fn queue_family_index(&self) -> u32 {
+        self.queue_family_index
+    }
+
+    pub fn queue(&self) -> vk::Queue {
+        self.queue
+    }
+}
 
 impl Drop for Device {
     fn drop(&mut self) {
