@@ -1,12 +1,12 @@
-use std::time::Duration;
+use std::{ptr, time::Duration};
 
 use anyhow::Result;
+use ash::vk;
 use log::{debug, trace};
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, delegate_dispatch, delegate_noop,
+    Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
     globals::{GlobalList, GlobalListContents},
     protocol::{
-        wl_buffer::WlBuffer,
         wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
         wl_registry::{self, WlRegistry},
@@ -30,33 +30,34 @@ use wayland_protocols::{
     },
 };
 
-use crate::buffer_pool::{BufferDispatch, BufferHandle, BufferPool};
+use crate::vulkan;
 
 pub struct Window {
     pub closed: bool,
     width: u32,
     height: u32,
-    shm: WlShm,
     surface: WlSurface,
     viewport: WpViewport,
     fractional_scale_supported: bool,
     scale: f64,
-    buffer_pool: BufferPool,
-    #[allow(clippy::type_complexity)]
-    draw_callback: Box<dyn FnMut(&mut [u32], u32, u32, Duration)>,
+    vk_device: vulkan::SwapchainDevice,
+    vk_surface: vk::SurfaceKHR,
+    vk_swapchain: vk::SwapchainKHR,
+    vk_swapchain_images: Vec<vk::Image>,
 }
 
 impl Window {
     pub fn new(
-        globals: &GlobalList,
+        conn: &Connection,
         qh: &QueueHandle<Self>,
+        globals: &GlobalList,
         width: u32,
         height: u32,
         title: String,
-        draw: impl FnMut(&mut [u32], u32, u32, Duration) + 'static,
     ) -> Result<Self> {
+        let vk_instance = vulkan::WaylandInstance::new()?;
+
         let compositor: WlCompositor = globals.bind(qh, 4..=6, ())?;
-        let shm: WlShm = globals.bind(qh, 1..=1, ())?;
         let xdg_wm_base: XdgWmBase = globals.bind(qh, 1..=1, ())?;
         let viewporter: WpViewporter = globals.bind(qh, 1..=1, ())?;
         let fractional_scale_manager: Option<WpFractionalScaleManagerV1> =
@@ -74,19 +75,39 @@ impl Window {
 
         xdg_toplevel.set_title(title);
 
-        let buffer_pool = BufferPool::new(&shm, qh, width, height)?;
+        let vk_device = vk_instance.create_device_for_conn(conn)?;
+
+        let vk_surface = unsafe {
+            vk_instance.khr_wayland_instance().create_wayland_surface(
+                &vk::WaylandSurfaceCreateInfoKHR {
+                    display: conn.display().id().as_ptr().cast(),
+                    surface: surface.id().as_ptr().cast(),
+                    ..Default::default()
+                },
+                None,
+            )?
+        };
+
+        let (vk_swapchain, vk_swapchain_images) = create_vk_swapchain(
+            &vk_device,
+            vk_surface,
+            vk::SwapchainKHR::null(),
+            width,
+            height,
+        )?;
 
         let mut window = Self {
             closed: false,
             width,
             height,
-            shm,
             surface,
             viewport,
             fractional_scale_supported: fractional_scale_manager.is_some(),
             scale: 1.0,
-            buffer_pool,
-            draw_callback: Box::new(draw),
+            vk_device,
+            vk_surface,
+            vk_swapchain,
+            vk_swapchain_images,
         };
 
         // Kick off the frame timer by drawing our first frame.
@@ -96,34 +117,54 @@ impl Window {
     }
 
     fn handle_frame(&mut self, qh: &QueueHandle<Self>, timestamp: Duration) -> Result<()> {
-        let (buffer, mapping) = self.buffer_pool.get_buffer(qh)?;
-
         trace!("frame at {timestamp:?}");
+
+        // TODO: Recreate if suboptimal.
+        let (image_idx, _) = unsafe {
+            self.vk_device.khr_swapchain_device().acquire_next_image(
+                self.vk_swapchain,
+                0,
+                vk::Semaphore::null(),
+                vk::Fence::null(),
+            )?
+        };
+
+        let _image = self.vk_swapchain_images[image_idx as usize];
+
+        // TODO: bind and draw into image...
 
         let (width, height) = (
             (self.width as f64 * self.scale).round() as u32,
             (self.height as f64 * self.scale).round() as u32,
         );
 
-        (self.draw_callback)(mapping, width, height, timestamp);
-
-        trace!("attach buffer {width}×{height}, scale {}", self.scale);
-
-        self.surface.attach(Some(&buffer), 0, 0);
         self.viewport
             .set_source(0.0, 0.0, width as f64, height as f64);
         self.viewport
             .set_destination(self.width as i32, self.height as i32);
-        self.surface
-            .damage_buffer(0, 0, width as i32, height as i32);
 
         self.surface.frame(qh, FrameCallbackToken);
-        self.surface.commit();
+
+        // This present call will also commit the surface.
+        unsafe {
+            self.vk_device.khr_swapchain_device().queue_present(
+                self.vk_device.device().queue(),
+                &vk::PresentInfoKHR {
+                    wait_semaphore_count: 0,
+                    p_wait_semaphores: ptr::null(),
+                    swapchain_count: 1,
+                    p_swapchains: [self.vk_swapchain].as_ptr(),
+                    p_image_indices: [image_idx].as_ptr(),
+                    p_results: ptr::null_mut(),
+                    ..Default::default()
+                },
+            )?;
+        }
 
         Ok(())
     }
 
-    fn set_scale(&mut self, qh: &QueueHandle<Self>, scale: f64) {
+    fn set_scale(&mut self, _qh: &QueueHandle<Self>, scale: f64) {
         if scale != self.scale {
             debug!("buffer scale: {} -> {}", self.scale, scale);
 
@@ -131,10 +172,60 @@ impl Window {
             let new_height = (self.height as f64 * scale).round() as u32;
 
             self.scale = scale;
-            self.buffer_pool = BufferPool::new(&self.shm, qh, new_width, new_height)
-                .expect("failed to create new buffer pool");
+
+            let (new_swapchain, new_images) = create_vk_swapchain(
+                &self.vk_device,
+                self.vk_surface,
+                self.vk_swapchain,
+                new_width,
+                new_height,
+            )
+            .expect("failed to create new swapchain");
+
+            // TODO: Destroy old stuff
+
+            self.vk_swapchain = new_swapchain;
+            self.vk_swapchain_images = new_images;
         }
     }
+}
+
+fn create_vk_swapchain(
+    device: &vulkan::SwapchainDevice,
+    vk_surface: vk::SurfaceKHR,
+    old_swapchain: vk::SwapchainKHR,
+    width: u32,
+    height: u32,
+) -> Result<(vk::SwapchainKHR, Vec<vk::Image>)> {
+    let khr_swapchain_device = device.khr_swapchain_device();
+
+    let vk_swapchain = unsafe {
+        khr_swapchain_device.create_swapchain(
+            &vk::SwapchainCreateInfoKHR {
+                surface: vk_surface,
+                min_image_count: 2,
+                image_format: vk::Format::R8G8B8_UNORM,
+                image_color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+                image_extent: vk::Extent2D { width, height },
+                image_array_layers: 1,
+                image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                image_sharing_mode: vk::SharingMode::EXCLUSIVE,
+                queue_family_index_count: 1,
+                p_queue_family_indices: [device.device().queue_family_index()].as_ptr(),
+                pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
+                composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+                present_mode: vk::PresentModeKHR::MAILBOX,
+                clipped: vk::TRUE,
+                old_swapchain,
+                ..Default::default()
+            },
+            None,
+        )?
+    };
+
+    let vk_swapchain_images = unsafe { khr_swapchain_device.get_swapchain_images(vk_swapchain)? };
+
+    Ok((vk_swapchain, vk_swapchain_images))
 }
 
 struct FrameCallbackToken;
@@ -175,8 +266,6 @@ impl Dispatch<WlSurface, ()> for Window {
         }
     }
 }
-
-delegate_dispatch!(Window: [WlBuffer: BufferHandle] => BufferDispatch);
 
 impl Dispatch<WpFractionalScaleV1, ()> for Window {
     fn event(
