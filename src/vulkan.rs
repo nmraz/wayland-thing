@@ -141,6 +141,7 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
+            let _ = self.device.device_wait_idle();
             self.device.destroy_device(None);
         }
     }
