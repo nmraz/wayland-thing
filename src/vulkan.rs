@@ -18,14 +18,18 @@ impl Drop for Instance {
 }
 
 impl Instance {
-    pub fn new() -> Result<Arc<Self>> {
+    pub fn new(extension_names: &[&CStr]) -> Result<Arc<Self>> {
         let entry = unsafe { ash::Entry::load()? };
+
+        let extension_names: Vec<_> = extension_names.iter().map(|name| name.as_ptr()).collect();
 
         let instance_create_info = vk::InstanceCreateInfo {
             p_application_info: &vk::ApplicationInfo {
                 api_version: vk::make_api_version(0, 1, 0, 0),
                 ..Default::default()
             },
+            enabled_extension_count: extension_names.len() as u32,
+            pp_enabled_extension_names: extension_names.as_ptr(),
             ..Default::default()
         };
 
@@ -34,7 +38,11 @@ impl Instance {
         Ok(Arc::new(Self { entry, instance }))
     }
 
-    pub fn create_default_graphics_device(self: &Arc<Self>) -> Result<Arc<Device>> {
+    pub fn create_device(
+        self: &Arc<Self>,
+        extension_names: &[&CStr],
+        mut match_dev: impl FnMut(vk::PhysicalDevice, u32, &vk::QueueFamilyProperties) -> bool,
+    ) -> Result<Arc<Device>> {
         let available_devices = unsafe { self.instance.enumerate_physical_devices()? };
         let (physical_device, queue_family_index) = available_devices
             .iter()
@@ -43,12 +51,10 @@ impl Instance {
                     self.instance
                         .get_physical_device_queue_family_properties(physical_device)
                 };
-                let (_, queue_family_index) =
-                    queue_families.iter().zip(0..).find(|(properties, _idx)| {
-                        properties
-                            .queue_flags
-                            .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::TRANSFER)
-                    })?;
+                let (_, queue_family_index) = queue_families
+                    .iter()
+                    .zip(0..)
+                    .find(|&(properties, idx)| match_dev(physical_device, idx, properties))?;
 
                 Some((physical_device, queue_family_index))
             })
@@ -65,6 +71,8 @@ impl Instance {
             device_properties.device_type
         );
 
+        let extension_names: Vec<_> = extension_names.iter().map(|name| name.as_ptr()).collect();
+
         let device_create_info = vk::DeviceCreateInfo {
             queue_create_info_count: 1,
             p_queue_create_infos: &vk::DeviceQueueCreateInfo {
@@ -73,6 +81,8 @@ impl Instance {
                 p_queue_priorities: [1f32].as_ptr(),
                 ..Default::default()
             },
+            enabled_extension_count: extension_names.len() as u32,
+            pp_enabled_extension_names: extension_names.as_ptr(),
             ..Default::default()
         };
 
