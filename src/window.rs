@@ -44,6 +44,7 @@ pub struct Window {
     vk_surface: vk::SurfaceKHR,
     vk_swapchain: vk::SwapchainKHR,
     vk_swapchain_images: Vec<vk::Image>,
+    acquire_image_sem: vk::Semaphore,
 }
 
 impl Window {
@@ -104,6 +105,12 @@ impl Window {
             )?
         };
 
+        let acquire_image_sem = unsafe {
+            vk_device
+                .device()
+                .create_semaphore(&Default::default(), None)?
+        };
+
         let (vk_swapchain, vk_swapchain_images) = create_vk_swapchain(
             &vk_device,
             vk_surface,
@@ -124,6 +131,7 @@ impl Window {
             vk_surface,
             vk_swapchain,
             vk_swapchain_images,
+            acquire_image_sem,
         };
 
         // Kick off the frame timer by drawing our first frame.
@@ -140,7 +148,7 @@ impl Window {
             self.vk_device.khr_swapchain_device().acquire_next_image(
                 self.vk_swapchain,
                 0,
-                vk::Semaphore::null(),
+                self.acquire_image_sem,
                 vk::Fence::null(),
             )?
         };
@@ -166,8 +174,8 @@ impl Window {
             self.vk_device.khr_swapchain_device().queue_present(
                 self.vk_device.queue(),
                 &vk::PresentInfoKHR {
-                    wait_semaphore_count: 0,
-                    p_wait_semaphores: ptr::null(),
+                    wait_semaphore_count: 1,
+                    p_wait_semaphores: [self.acquire_image_sem].as_ptr(),
                     swapchain_count: 1,
                     p_swapchains: [self.vk_swapchain].as_ptr(),
                     p_image_indices: [image_idx].as_ptr(),
