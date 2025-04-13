@@ -1,4 +1,4 @@
-use std::{ptr, time::Duration};
+use std::{ptr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use ash::vk;
@@ -40,7 +40,7 @@ pub struct Window {
     viewport: WpViewport,
     fractional_scale_supported: bool,
     scale: f64,
-    vk_device: vulkan::SwapchainDevice,
+    vk_device: Arc<vulkan::Device>,
     vk_surface: vk::SurfaceKHR,
     vk_swapchain: vk::SwapchainKHR,
     vk_swapchain_images: Vec<vk::Image>,
@@ -55,7 +55,7 @@ impl Window {
         height: u32,
         title: String,
     ) -> Result<Self> {
-        let vk_instance = vulkan::WaylandInstance::new()?;
+        let vk_instance = vulkan::Instance::new()?;
 
         let compositor: WlCompositor = globals.bind(qh, 4..=6, ())?;
         let xdg_wm_base: XdgWmBase = globals.bind(qh, 1..=1, ())?;
@@ -75,13 +75,29 @@ impl Window {
 
         xdg_toplevel.set_title(title);
 
-        let vk_device = vk_instance.create_device_for_conn(conn)?;
+        let display_ptr = conn.display().id().as_ptr().cast();
+        let surface_ptr = surface.id().as_ptr().cast();
+
+        let vk_device = vk_instance.create_device(|physical_device, idx, properties| {
+            properties
+                .queue_flags
+                .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::TRANSFER)
+                && unsafe {
+                    vk_instance
+                        .khr_wayland_instance()
+                        .get_physical_device_wayland_presentation_support(
+                            physical_device,
+                            idx,
+                            &mut *display_ptr,
+                        )
+                }
+        })?;
 
         let vk_surface = unsafe {
             vk_instance.khr_wayland_instance().create_wayland_surface(
                 &vk::WaylandSurfaceCreateInfoKHR {
-                    display: conn.display().id().as_ptr().cast(),
-                    surface: surface.id().as_ptr().cast(),
+                    display: display_ptr,
+                    surface: surface_ptr,
                     ..Default::default()
                 },
                 None,
@@ -148,7 +164,7 @@ impl Window {
         // This present call will also commit the surface.
         unsafe {
             self.vk_device.khr_swapchain_device().queue_present(
-                self.vk_device.device().queue(),
+                self.vk_device.queue(),
                 &vk::PresentInfoKHR {
                     wait_semaphore_count: 0,
                     p_wait_semaphores: ptr::null(),
@@ -191,7 +207,7 @@ impl Window {
 }
 
 fn create_vk_swapchain(
-    device: &vulkan::SwapchainDevice,
+    device: &vulkan::Device,
     vk_surface: vk::SurfaceKHR,
     old_swapchain: vk::SwapchainKHR,
     width: u32,
@@ -211,7 +227,7 @@ fn create_vk_swapchain(
                 image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 image_sharing_mode: vk::SharingMode::EXCLUSIVE,
                 queue_family_index_count: 1,
-                p_queue_family_indices: [device.device().queue_family_index()].as_ptr(),
+                p_queue_family_indices: [device.queue_family_index()].as_ptr(),
                 pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
                 composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
                 present_mode: vk::PresentModeKHR::MAILBOX,

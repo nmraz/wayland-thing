@@ -3,11 +3,11 @@ use std::{ffi::CStr, sync::Arc};
 use anyhow::{Result, anyhow};
 use ash::{khr, vk};
 use log::info;
-use wayland_client::{Connection, Proxy};
 
 pub struct Instance {
     entry: ash::Entry,
     instance: ash::Instance,
+    khr_wayland_instance: khr::wayland_surface::Instance,
 }
 
 impl Drop for Instance {
@@ -19,10 +19,10 @@ impl Drop for Instance {
 }
 
 impl Instance {
-    pub fn new(extension_names: &[&CStr]) -> Result<Arc<Self>> {
+    pub fn new() -> Result<Arc<Self>> {
         let entry = unsafe { ash::Entry::load()? };
 
-        let extension_names: Vec<_> = extension_names.iter().map(|name| name.as_ptr()).collect();
+        let extension_names = [khr::wayland_surface::NAME.as_ptr()];
 
         let instance_create_info = vk::InstanceCreateInfo {
             p_application_info: &vk::ApplicationInfo {
@@ -35,13 +35,17 @@ impl Instance {
         };
 
         let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
+        let khr_wayland_instance = khr::wayland_surface::Instance::new(&entry, &instance);
 
-        Ok(Arc::new(Self { entry, instance }))
+        Ok(Arc::new(Self {
+            entry,
+            instance,
+            khr_wayland_instance,
+        }))
     }
 
     pub fn create_device(
         self: &Arc<Self>,
-        extension_names: &[&CStr],
         mut match_dev: impl FnMut(vk::PhysicalDevice, u32, &vk::QueueFamilyProperties) -> bool,
     ) -> Result<Arc<Device>> {
         let available_devices = unsafe { self.instance.enumerate_physical_devices()? };
@@ -72,7 +76,7 @@ impl Instance {
             device_properties.device_type
         );
 
-        let extension_names: Vec<_> = extension_names.iter().map(|name| name.as_ptr()).collect();
+        let extension_names = [khr::swapchain::NAME.as_ptr()];
 
         let device_create_info = vk::DeviceCreateInfo {
             queue_create_info_count: 1,
@@ -94,11 +98,14 @@ impl Instance {
                     .create_device(physical_device, &device_create_info, None)?
             };
 
+            let khr_swapchain_device = khr::swapchain::Device::new(&self.instance, &device);
+
             let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
             Ok(Arc::new(Device {
                 instance: Arc::clone(self),
                 device,
+                khr_swapchain_device,
                 queue_family_index,
                 queue,
             }))
@@ -112,10 +119,15 @@ impl Instance {
     pub fn instance(&self) -> &ash::Instance {
         &self.instance
     }
+
+    pub fn khr_wayland_instance(&self) -> &khr::wayland_surface::Instance {
+        &self.khr_wayland_instance
+    }
 }
 
 pub struct Device {
     device: ash::Device,
+    khr_swapchain_device: khr::swapchain::Device,
     instance: Arc<Instance>,
     queue_family_index: u32,
     queue: vk::Queue,
@@ -137,6 +149,10 @@ impl Device {
     pub fn queue(&self) -> vk::Queue {
         self.queue
     }
+
+    pub fn khr_swapchain_device(&self) -> &khr::swapchain::Device {
+        &self.khr_swapchain_device
+    }
 }
 
 impl Drop for Device {
@@ -145,81 +161,5 @@ impl Drop for Device {
             let _ = self.device.device_wait_idle();
             self.device.destroy_device(None);
         }
-    }
-}
-
-pub struct WaylandInstance {
-    instance: Arc<Instance>,
-    khr_wayland_instance: khr::wayland_surface::Instance,
-}
-
-impl WaylandInstance {
-    pub fn new() -> Result<Self> {
-        let instance = Instance::new(&[c"VK_KHR_wayland_surface"])?;
-        let khr_wayland_instance =
-            khr::wayland_surface::Instance::new(instance.entry(), instance.instance());
-        Ok(Self {
-            instance,
-            khr_wayland_instance,
-        })
-    }
-
-    pub fn create_device_for_conn(&self, conn: &Connection) -> Result<SwapchainDevice> {
-        let display_ptr = conn.display().id().as_ptr().cast();
-
-        let device = self.instance.create_device(
-            &[c"VK_KHR_swapchain"],
-            |physical_device, idx, properties| {
-                properties
-                    .queue_flags
-                    .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::TRANSFER)
-                    && unsafe {
-                        self.khr_wayland_instance
-                            .get_physical_device_wayland_presentation_support(
-                                physical_device,
-                                idx,
-                                &mut *display_ptr,
-                            )
-                    }
-            },
-        )?;
-
-        let khr_swapchain_device =
-            khr::swapchain::Device::new(self.instance.instance(), device.device());
-
-        unsafe { Ok(SwapchainDevice::from_raw(device, khr_swapchain_device)) }
-    }
-
-    pub fn instance(&self) -> &Arc<Instance> {
-        &self.instance
-    }
-
-    pub fn khr_wayland_instance(&self) -> &khr::wayland_surface::Instance {
-        &self.khr_wayland_instance
-    }
-}
-
-pub struct SwapchainDevice {
-    device: Arc<Device>,
-    khr_swapchain_device: khr::swapchain::Device,
-}
-
-impl SwapchainDevice {
-    pub unsafe fn from_raw(
-        device: Arc<Device>,
-        khr_swapchain_device: khr::swapchain::Device,
-    ) -> Self {
-        Self {
-            device,
-            khr_swapchain_device,
-        }
-    }
-
-    pub fn device(&self) -> &Arc<Device> {
-        &self.device
-    }
-
-    pub fn khr_swapchain_device(&self) -> &khr::swapchain::Device {
-        &self.khr_swapchain_device
     }
 }
